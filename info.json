@@ -1,0 +1,9 @@
+{
+    "utc_build_time": "2019-10-31 05:20:58.121679",
+    "shelf_items": [
+        {
+            "command": "import fossilAnimTools.animSwitcherGui\nfossilAnimTools.animSwitcherGui.Gui()",
+            "annotation": "Swtch"
+        }
+    ]
+}
