@@ -107,7 +107,7 @@ class Gui(object):
                                 
                                 self.presetFileChooser = optionMenu(l='Presets', cc=Callback(self.loadSpace))
                                 self.presetFiles = []
-                                for folder in spacePresets.SpacePresets.folders:
+                                for folder in spacePresets.SpacePresets.presetLocations:
                                     folder = os.path.expandvars(folder)
                                     
                                     if not os.path.exists(folder):
@@ -165,12 +165,14 @@ class Gui(object):
             
             
             with formLayout() as spaceTab:
-                space = spacePresets.SpacePresets()
+                self.spacePresetsGui, self.qtui = spacePresets.SpacePresets.asMelGui()
                 
                 formLayout(spaceTab, e=True,
                     af=[
-                        (space.mainForm, 'top', 0),
-                        (space.mainForm, 'bottom', 0),
+                        (self.spacePresetsGui, 'top', 0),
+                        (self.spacePresetsGui, 'bottom', 0),
+                        (self.spacePresetsGui, 'right', 0),
+                        (self.spacePresetsGui, 'left', 0),
                     ]
                 )
                 
@@ -231,7 +233,7 @@ class Gui(object):
             
             # Determine the times each controller has keys
             for ctrl in controllers:
-                keyTimes = lib.anim.getKeyTimes(ctrl)
+                keyTimes = lib.anim.findKeyTimes(ctrl)
                 
                 if mode != 2:
                     keyTimes = [t for t in keyTimes if start <= t <= end]

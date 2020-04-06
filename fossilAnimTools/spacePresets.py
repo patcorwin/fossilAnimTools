@@ -19,21 +19,32 @@ from __future__ import absolute_import, division, print_function
 import collections
 import copy
 from functools import partial
+import itertools
 import json
 import logging
 import os
 import re
 
-from pymel.core import button, Callback, cmds, columnLayout, confirmDialog, currentTime, cutKey, deleteUI, fileDialog2, \
-    frameLayout, formLayout, getAttr, keyframe, menu, menuBarLayout, menuItem, optionMenu, playbackOptions, promptDialog, rowColumnLayout, \
-    select, selected, setKeyframe, scriptJob, scrollLayout, separator, showWindow, text, textScrollList, window, optionMenuGrp
+from PySide2 import QtWidgets
+from shiboken2 import wrapInstance
+from maya import OpenMayaUI
+
+from pymel.core import columnLayout, currentTime, cutKey, deleteUI, \
+    getAttr, keyframe, playbackOptions, promptDialog, PyNode, \
+    select, selected, setKeyframe, scriptJob, window
 
 from pdil.add import shortName, simpleName
 
-from pdil import core
+from pdil import core, lib
 from pdil.tool import fossil
 
+from .spacepresetgui import Ui_Form
+from .spacePrestsPrompt_qtui import Ui_Dialog
+
 log = logging.getLogger(__name__)
+presetLog = logging.getLogger('presetSwitching')
+presetLog.setLevel( logging.DEBUG )
+
 
 try:
     basestring # noqa
@@ -44,374 +55,324 @@ except Exception:
 if '_previouslyLoaded' not in globals():
     _previouslyLoaded = None
 
+
 ACTIVATE_KEY = '# Activate'
 
 
-class SpacePresets(object):
-    
+class SpacePresets(QtWidgets.QWidget):
+
     name = 'SpacePresets'
-    menuWidth = 120
-    labelWidth = 100
-    leftSide = 300
-    xWidth = 20
-
-    #folders = [ 'C:/MAYA_APP_DIR/SpacePresets', '%RxArtToolRoot%/Maya/SpacePresets' ]
-    folders = { 'local': os.environ['maya_app_dir'] + '/SpacePresets' }
-
+    
+    presetLocations = { 'local': os.environ['maya_app_dir'] + '/SpacePresets' }
+    
     @classmethod
     @core.alt.name( 'Space Presets' )
     def run(cls):
         if window(cls.name, ex=True):
             deleteUI(cls.name)
-
-        window(cls.name)
-        menuBarLayout()
+    
+    
+    @property
+    def presetFilepath(self):
+        return self.presetFiles[ self.ui.presetChooser.currentText() ]
             
-        content = SpacePresets()
-        content.menu()
-
-        showWindow()
+    
+    @classmethod
+    def asMelGui(cls):
         
-        return content
-
-    def menu(self):
-        menu(l='File')
-        menuItem(l='Save', c=Callback(self.save))
-        menuItem(l='Load', c=Callback(self.load))
-
-    def __init__(self):
-        global _previouslyLoaded
-        self.presets = {}
-        self.curPreset = {}
-
-        self.presetModificationUI = []
+        melLayout = columnLayout(adj=True)
+        ptr = OpenMayaUI.MQtUtil.findLayout( melLayout.name() )
+        widget = wrapInstance( long(ptr), QtWidgets.QWidget)  # noqa Despite findLayout, must cast to widget and use .layout()
         
-        self.filepath = ''
+        ui = cls()
+        widget.layout().addWidget(ui)
+        
+        return melLayout, ui
+    
+    def __init__(self, parent=None):
+        super(SpacePresets, self).__init__()
+        
+        self.ui = Ui_Form()
+        self.ui.setupUi(self)
+        
+        # Sets the control select button portion to stretch
+        header = self.ui.profileTable.horizontalHeader()
+        header.setSectionResizeMode(0, header.Stretch)
+        
+        self.mainControllers = []
+        self.presetFiles = {}
+        self.profiles = {}
+        
+        self.curProfile = {}
+        
+        self.populateCharacterChooser()
+        self.populatePresetChooser()
 
-        mainForm = formLayout()
+        self.ui.presetChooser.currentTextChanged.connect(self.setPreset)
+        self.ui.newPreset.clicked.connect( self.addNewPreset )
+        
+        self.ui.profileChooser.currentTextChanged.connect(self.setProfile)
+        self.ui.newProfile.clicked.connect( self.profileNew )
+        self.ui.rename.clicked.connect( self.profileRename )
+        self.ui.clone.clicked.connect( self.profileClone )
+        self.ui.deleteProfile.clicked.connect( self.profileDelete )
+        
+        self.ui.applyFrame.clicked.connect( partial(self.applySwitch, 'frame') )
+        self.ui.applyRange.clicked.connect( partial(self.applySwitch, 'range') )
+        self.ui.applySelected.clicked.connect( partial(self.applySwitch, 'selected') )
+        self.ui.applyAll.clicked.connect( partial(self.applySwitch, 'all') )
+        
+        self.ui.addControls.clicked.connect( self.addSelectedControl )
+        
+        self.profileModifiers = [self.ui.newProfile, self.ui.rename, self.ui.clone, self.ui.deleteProfile]
+        self.applyButtons = [self.ui.applyFrame, self.ui.applyRange, self.ui.applySelected, self.ui.applyAll]
+    
+        self.enableProfileGui(False)
+    
+    
+    def applySwitch(self, mode):
+        apply(self.curProfile, mode)
+    
+    
+    def enableProfileGui(self, val):
+    
+        for button in itertools.chain(self.profileModifiers, self.applyButtons):
+            button.setEnabled(val)
+        
+        self.ui.addControls.setEnabled(val)
+        
 
-        self.mainForm = mainForm
-
-        with columnLayout(adj=True) as self.mainLayout:
-            with rowColumnLayout(nc=4):
-                text(l='Current:  ')
-                self.name = text(l='')
-                self.location = text(l='')
-                self.char = optionMenu(l='', cc=Callback(self.changeCharacter))
+    def populateCharacterChooser(self):
+        self.mainControllers = core.findNode.mainControls()
+        self.ui.characterChooser.clear()
+        self.ui.characterChooser.addItems( ['-'] + [main.name() for main in self.mainControllers] )
+    
+    
+    def populatePresetChooser(self):
+        '''
+        Fills are options for the preset files.
+        '''
+        
+        self.presetFiles = collections.OrderedDict({'-': ''}) # { <label>: <file path> }
+        self.ui.presetChooser.clear()
+        
+        for folder in self.presetLocations.values():
+            if not os.path.exists(folder):
+                os.makedirs(folder)
             
-            self.presetModificationUI.append(button(l='Make Preset', c=Callback(self.makePreset)))
-
-            separator(st='in')
-            with rowColumnLayout(nc=3, cw=[(i, self.leftSide / 3 - 2) for i in range(1, 4)]):
-                
-                self.presetModificationUI += [
-                    button(l='Rename', c=Callback(self.renamePreset)),
-                    button(l='Delete', c=Callback(self.removePreset)),
-                    button(l='Clone', c=Callback(self.clonePreset)) ]
-            
-            self.presetList = textScrollList(nr=9, sc=Callback(self.presetSelected))
-
-            with frameLayout(l='Apply') as applyLayout:
-                with rowColumnLayout(nc=4):
-                    button(w=70, l='Frame', c=Callback(self.apply))
-                    button(w=70, l='Playback', c=Callback(self.apply, 'range'))
-                    button(w=70, l='All', c=Callback(self.apply, 'all'))
-                    button(w=70, l='Selected', c=Callback(self.apply, 'selected'))
-
-            self.presetModificationUI.append(applyLayout)
-            
-            with frameLayout(l='Loading', cll=True):
-
-                self.presetLocationChooser = optionMenuGrp(l='Presets location', cc=self.setPresetLocation)
-                for name in self.folders:
-                    menuItem(l=name)
-                
-                #with rowColumnLayout(nc=2, cw=[(1, self.leftSide / 2), (2, self.leftSide / 2)]):
-                with columnLayout(adj=True):
-                    button(l='New', c=Callback(self.newCharacterPreset))
-                    #self.localList = textScrollList(nr=5)
-                    self.presetPaths = textScrollList(nr=5, sc=self.loadPreset)
+            for filename in os.listdir(folder):
+                if filename.lower().endswith('.json'):
+                    name = filename[:-5]
                     
-                #with columnLayout(adj=True):
-                #    button(l='Public:   New', c=Callback(self.newCharacterPreset, 'public'))
-                #    self.publicList = textScrollList(nr=5)
-            
-            self.refreshCharacterLists()
-
-            # Technically these go with the stuff below but organizing ui in a formLayout is such a pain
-            text(l=' ')
-            button(l='Add Selected Control', c=Callback(self.grabSelected) )
-            text(l='Control - Spaces')
-            
-        # Jumping through hoops to get the bottom section expanding with window.
-        controlAssigner = scrollLayout(p=self.mainForm)
-        self.controlLister = rowColumnLayout( p=controlAssigner,                     nc=3,
-            cs=[(1, 10), (2, 10), (3, 14)],
-            cw=[(1, self.labelWidth), (2, self.menuWidth), (3, self.xWidth)])
+                    if name in self.presetFiles:
+                        name = os.path.basename(folder) + '/' + name
+                        i = 0
+                        while name in self.presetFiles:
+                            name += str(i)
+                    
+                    self.presetFiles[name] = folder + '/' + filename
         
-        formLayout(mainForm, e=True,
-            af=[
-                (self.mainLayout, 'left', 0),
-                (self.mainLayout, 'right', 0),
-                (self.mainLayout, 'top', 0),
+        self.ui.presetChooser.addItems( list(self.presetFiles.keys()) )
+
+
+    def setPreset(self, presetName):
+        '''
+        Callback when a preset is chosen, updates the profileChooser.
+        '''
+        
+        self.profiles = {}
+        
+        if presetName and presetName != '-':
+            filename = self.presetFiles[presetName]
+        
+            with open(filename, 'r') as fid:
+                self.profiles = json.load(fid, object_pairs_hook=collections.OrderedDict)
+            
+            self.populateProfileChooser()
+        else:
+            self.clearProfileChooser()
+            
+        self.ui.newProfile.setEnabled(True)
+    
+    
+    def populateProfileChooser(self):
+        self.clearProfileChooser()
+        self.ui.profileChooser.addItems( list(self.profiles) )
+    
+    
+    def clearProfileChooser(self):
+        self.ui.profileChooser.clear()
+        self.curProfile = {}
+    
+    
+    def setProfile(self, profileName):
+        log.debug('set profile ' + profileName)
+        self.clearControlSpaces()
+
+        if not profileName:
+            return
+
+        self.curProfile = collections.OrderedDict()
+        
+        # Get controls from the character chooser, defaulting to all
+        index = self.ui.characterChooser.currentIndex() - 1 # First item is blank so offset by 1
+        if index >= 0:
+            allControls = core.findNode.controllers(main=self.mainControllers[index])
+        else:
+            allControls = core.findNode.controllers()
+    
+        nameMap = {shortName(ctrl): ctrl for ctrl in allControls}
+        
+        items = self.profiles[ profileName ].items()
+        self.ui.profileTable.setRowCount( len(items) )
+        
+        for i, (ctrlName, space) in enumerate(items):
+                        
+            if ctrlName in nameMap:
+                self.curProfile[nameMap[ctrlName]] = space
+                self.addRow( i, nameMap[ctrlName], space )
                 
-                (controlAssigner, 'left', 0),
-                (controlAssigner, 'right', 0),
-                (controlAssigner, 'bottom', 0)
-            ],
-            
-            ac=[
-                (controlAssigner, 'top', 0, self.mainLayout),
-            ]
-        )
-        
-        for name in self.presets:
-            self.presetList.append(name)
-            
-        self.disablePresetUI()
-        
-        scriptJob(e=['NewSceneOpened', self.clear], p=self.mainLayout)
-        scriptJob(e=['SceneOpened', self.reload], p=self.mainLayout)
-        
-        # Handle opening the last thing
-        self.reload()
-    
-    def setPresetLocation(self, locKey):
-        pass
-    
-    def changeCharacter(self):
-        index = self.char.getSelect() - 1  # One off indices
-        self.presets = self.rankedPresets.items()[index][1]
-        self.loadFormattedPreset()
-
-    def clear(self):
-        self.presets = {}
-        self.curPreset = {}
-        self.filepath = ''
-        
-        self.presetList.removeAll()
-        self.clearControlSpaces()
-
-    def reload(self):
-        '''
-        Opening a file will try to reload so the internal control mappings are
-        correct.
-        '''
-        global _previouslyLoaded
-        if _previouslyLoaded:
-            if os.path.exists(_previouslyLoaded):
-                self.clearControlSpaces()
-                self._load(_previouslyLoaded)
+            elif isinstance(ctrlName, PyNode):
+                self.curProfile[ctrlName] = space
+                self.addRow( i, ctrlName, space )
+                
             else:
-                self.clear()
-        else:
-            self.clear()
-
-    def loadPreset(self):
-        presetLocKey = self.presetLocationChooser.getValue()
-        folder = self.folders[ presetLocKey ]
+                self.curProfile[ctrlName] = space
+                self.addEmpty( i, ctrlName, space )
         
-        name = self.presetPaths.getSelectItem()[0]
+        self.profiles[ profileName ] = self.curProfile
         
-        filename = folder + '/%s.json' % name
-        
-        print(os.path.exists(filename), filename, '-----')
-        
-        self._load( filename)
-
-    def refreshCharacterLists(self):
-        #def loadCharacters(folder, lister, location):
-        #    folder = os.path.expandvars(folder)
-        #    if not os.path.exists(folder):
-        #        return
-        #
-        #    for f in os.listdir(folder):
-        #        if f.lower().endswith('.json'):
-        #            textScrollList(lister, e=True, a=f[:-5])
-        #
-        #    def loadPreset():
-        #        sel = textScrollList(lister, q=True, si=True)
-        #        if not sel:
-        #            return
-        #        self._load( folder + '/%s.json' % sel[0])
-        #
-        #    textScrollList(lister, e=True, sc=loadPreset)
-        
-        #textScrollList(self.localList, e=True, ra=True)
-        #textScrollList(self.publicList, e=True, ra=True)
-            
-        #loadCharacters(self.folders[0], self.localList, 'local')
-        #loadCharacters(self.folders[1], self.publicList, 'public')
-        self.presetPaths.removeAll()
-        
-        presetLocKey = self.presetLocationChooser.getValue()
-        
-        folder = self.folders[ presetLocKey ]
-        
-        print('yes')
-        
-        if not os.path.exists(folder):
-            return
-            
-        for f in os.listdir(folder):
-            print('f----', f)
-            if f.lower().endswith('.json'):
-                print('yess')
-                #textScrollList(self.presetPaths, e=True, a=f[:-5])
-                self.presetPaths.append(f[:-5])
-
-
-    def enablePresetUI(self):
-        '''
-        When a preset is loaded, the ui to modify it must be enabled.
-        '''
-        for ctrl in self.presetModificationUI:
-            ctrl.setEnable(True)
-
-    def disablePresetUI(self):
-        '''
-        When there is no preset loaded, disable the UI that modifies presets.
-        '''
-        for ctrl in self.presetModificationUI:
-            ctrl.setEnable(False)
-
-    def newCharacterPreset(self):
-        locKey = self.presetLocationChooser.getValue()
-        
-        res = promptDialog(t='Character', m='What is the name of the character?')
-        if res != 'Confirm' or not promptDialog(tx=True, q=True):
-            return
-        
-        name = promptDialog(tx=True, q=True)
-        
-        path = self.folders[locKey]
-        
-        filename = path + '/' + name + '.json'
-        
-        if os.path.exists(filename):
-            self._load(filename)
-        else:
-            self.presets = {}
-            self.filepath = filename
-            self.autoSave()
-            self.setLoadedLabel()
-            self.refreshCharacterLists()
-            self.enablePresetUI()
-
-    def makePreset(self):
-        res = promptDialog(m='Name')
-        if res != 'Confirm' or not promptDialog(tx=True, q=True):
-            return
-
-        name = promptDialog(tx=True, q=True)
-        
-        if name in self.presets:
-            confirmDialog(m='A preset of that name already exists, choose another')
-            return
-        
-        self.presets[name] = {}
-        self.curPreset = self.presets[name]
-
-        self.presetList.append(name)
-        
-        self.autoSave()
-        
-        self.presetList.setSelectItem(name)
-        self.presetSelected()
-
+        self.enableProfileGui(True)
+    
+    
     def clearControlSpaces(self):
-        children = cmds.layout(self.controlLister.name(), q=True, ca=True)
-        if children:
-            deleteUI(children)
+        self.ui.profileTable.clearContents()
+        self.ui.profileTable.setRowCount(0)
 
-    def presetSelected(self):
-        presetName = self.presetList.getSelectItem()[0]
 
-        self.curPreset = self.presets[presetName]
-
-        self.clearControlSpaces()
-
-        for ctrl, space in sorted(self.curPreset.items()):
-            if not isinstance(ctrl, basestring):
-                try:
-                    self.addRow(ctrl, space)
-                except Exception:
-                    text(l='Error :' + ctrl.name, p=self.controlLister.name())
-                    text(l=space, p=self.controlLister.name())
-                    text(l='', p=self.controlLister.name())
-            else:
-                text(l='NOT FOUND:' + ctrl, p=self.controlLister.name())
-                text(l=space, p=self.controlLister.name())
-                text(l='', p=self.controlLister.name())
-
-    def renamePreset(self):
-        try:
-            presetName = self.presetList.getSelectItem()[0]
-        except IndexError:
-            return
-            
-        res = promptDialog(m='New Name', tx=presetName)
-        newName = promptDialog(q=True, tx=True)
-        if res == 'Confirm' and newName:
-            if newName == presetName:
-                return
-            
-            if newName in self.presets:
-                confirmDialog(m='A preset of that name already exists, choose another')
-                return
-            
-            self.presets[newName] = self.presets[presetName]
-            del self.presets[presetName]
-            self.presetList.removeItem(presetName)
-            self.presetList.append(newName)
-            self.clearControlSpaces()
-            self.presetList.setSelectItem(newName)
-            self.presetSelected()
-            self.autoSave()
+    def addNewPreset(self):
         
-    def clonePreset(self):
-        try:
-            presetName = self.presetList.getSelectItem()[0]
-        except IndexError:
-            return
-            
-        res = promptDialog(m='New Name')
-        newName = promptDialog(q=True, tx=True)
-        if res == 'Confirm' and newName:
-            if newName in self.presets:
-                confirmDialog(m='A preset of that name already exists, choose another')
-                return
-            
-            self.presets[newName] = copy.deepcopy(self.presets[presetName])
-            
-            self.presetList.append(newName)
-            self.clearControlSpaces()
-            self.presetList.setSelectItem(newName)
-            self.presetSelected()
-            self.autoSave()
+        dialog = AddPresetDialog( list(self.presetLocations.keys()) )
+        dialog.exec_()
         
-    def removePreset(self):
-        try:
-            presetName = self.presetList.getSelectItem()[0]
-        except IndexError:
+        if dialog.result() != dialog.DialogCode.Accepted:
             return
             
-        del self.presets[presetName]
-        self.presetList.removeItem(presetName)
-        self.clearControlSpaces()
-        self.presetList.deselectAll()
+        name = dialog.ui.nameEntry.text()
+        location = dialog.ui.location.currentText()
+        
+        folder = self.presetLocations[location]
+        with open( folder + '/' + name + '.json', 'w' ) as fid:
+            fid.write('{}')
+        
+        self.populatePresetChooser()
+
+
+    def addRow(self, row, ctrl, space):
+        name = simpleName(ctrl)
+        selectButton = QtWidgets.QPushButton( name )
+        selectButton.clicked.connect( partial(select, ctrl) )
+        
+        spaceChooser = QtWidgets.QComboBox()
+        spaceChooser.addItems( fossil.space.getNames(ctrl) + [ACTIVATE_KEY] )
+        spaceChooser.setCurrentText(space)
+        spaceChooser.currentTextChanged.connect( partial(self.setSpace, ctrl) )
+        
+        removeButton = QtWidgets.QPushButton('X')
+        removeButton.clicked.connect( partial(self.removeControl, ctrl ) )
+        
+        #self.ui.profileTable.setItem(row, 0, QtWidgets.QTableWidgetItem(ctrl.name) )
+        self.ui.profileTable.setCellWidget(row, 0, selectButton )
+        self.ui.profileTable.setCellWidget(row, 1, spaceChooser )
+        self.ui.profileTable.setCellWidget(row, 2, removeButton )
+
+    
+    def addEmpty(self, row, name, space):
+        self.ui.profileTable.setItem(row, 0, QtWidgets.QTableWidgetItem('MISSING ' + name) )
+        self.ui.profileTable.setItem(row, 1, QtWidgets.QTableWidgetItem(space) )
+        
+        removeButton = QtWidgets.QPushButton('X')
+        removeButton.clicked.connect( partial(self.removeControl, name ) )
+        
+        self.ui.profileTable.setCellWidget(row, 2, removeButton )
+
+    
+    def removeControl(self, controlName):
+        log.debug( 'Removing {} type:{}'.format(controlName, type(controlName)) )
+        del self.curProfile[controlName]
+        self.autoSave()
+        self.setProfile( self.ui.profileChooser.currentText() )
+    
+
+    def profileNameValidator(self, name):
+        if name in self.profiles:
+            return 'A profile of that name already exists, choose another'
+
+
+    def profileRefresh(self, name):
+        self.autoSave()
+        self.populateProfileChooser()
+        if name:
+            self.setProfile(name)
+
+
+    def profileNew(self):
+        
+        name = profileNamePrompt(validator=self.profileNameValidator)
+        if not name:
+            return
+        
+        self.profiles[name] = {}
+        
+        self.profileRefresh(name)
+    
+    
+    def profileRename(self):
+        currentProfileName = self.ui.profileChooser.currentText()
+        
+        name = profileNamePrompt(validator=self.profileNameValidator)
+        if not name:
+            return
+        
+        self.profiles[name] = self.profiles[currentProfileName]
+        del self.profiles[currentProfileName]
+        
+        self.profileRefresh(name)
+
+
+    def profileClone(self):
+        currentProfileName = self.ui.profileChooser.currentText()
+        
+        name = profileNamePrompt(validator=self.profileNameValidator)
+        if not name:
+            return
+        
+        self.profiles[name] = copy.deepcopy(self.profiles[currentProfileName])
+        
+        self.profileRefresh(name)
+
+
+    def profileDelete(self):
+        currentProfileName = self.ui.profileChooser.currentText()
+        
+        del self.profiles[currentProfileName]
+        
+        self.profileRefresh(None)
+
+
+    def setSpace(self, ctrl, space):
+        self.curProfile[ctrl] = space
         self.autoSave()
 
-    def grabSelected(self):
-        try:
-            presetName = self.presetList.getSelectItem()[0]
-        except IndexError:
-            return
 
+    def addSelectedControl(self):
+        
+        newRows = []
+        
         # Verify we have a control, with spaces, not already in the preset
         for obj in selected():
             names = fossil.space.getNames(obj)
-            log.debug( 'Grabbing -- Obj: {}, names: {}'.format(obj, names) )
+            log.debug( 'Grabbing -- Obj: {}, spaces: {}'.format(obj, names) )
             
             motionOnly = False
             if not names:
@@ -420,299 +381,132 @@ class SpacePresets(object):
                 else:
                     motionOnly = True
 
-            if obj in self.curPreset:
+            if obj in self.curProfile:
                 continue
 
             # Finally add it to the preset, or '#' if it's a motion only switch
             if motionOnly:
-                self.curPreset[obj] = ACTIVATE_KEY
+                self.curProfile[obj] = ACTIVATE_KEY
             else:
-                self.curPreset[obj] = fossil.space.get(obj)
+                self.curProfile[obj] = fossil.space.get(obj)
 
-            self.addRow(obj, self.curPreset[obj])
-            
+            newRows.append( (obj, self.curProfile[obj]) )
+        
+        prevCount = self.ui.profileTable.rowCount()
+        self.ui.profileTable.setRowCount( prevCount + len(newRows) )
+        
+        for i, data in enumerate(newRows, prevCount):
+            self.addRow( i, *data )
+        
         self.autoSave()
 
-    def removeControl(self, ctrl):
-        try:
-            del self.curPreset[ctrl]
-            self.presetSelected()
-            
-            self.autoSave()
-        except KeyError:
-            pass
-
-    def _select(self, ctrlName):
-        select(ctrlName, add=core.keyModifier.control())
-
-    def addRow(self, ctrl, spaceName):
-
-        ctrlName = shortName(ctrl)
-                
-        cmds.button(l=ctrlName, p=self.controlLister.name(), w=self.menuWidth - 10, c=Callback(self._select, ctrlName))
-        
-        spaces = cmds.optionMenu(l='', p=self.controlLister.name(), w=self.menuWidth)
-        for space in fossil.space.getNames(ctrl):
-            cmds.menuItem(l=space)
-        cmds.menuItem(l=ACTIVATE_KEY)
-            
-        cmds.optionMenu(spaces, e=True, v=spaceName, cc=partial(self.setSpace, ctrl) )
-        
-        cmds.button(l='X', p=self.controlLister.name(), c=Callback(self.removeControl, ctrl))
-
-    def setSpace(self, ctrl, space):
-        self.curPreset[ctrl] = space
-        self.autoSave()
-
-    def apply(self, mode='frame'):
-        apply(self.curPreset, mode)
-        '''
-        if mode == 'frame':
-            keyRange = [currentTime()]*2
-        elif mode == 'all':
-            keyRange = (None, None)
-        elif mode == 'range':
-            keyRange = (playbackOptions(q=True, min=True), playbackOptions(q=True, max=True))
-        elif mode == 'selected':
-            if not lib.anim.rangeIsSelected():
-                keyRange = [currentTime()]*2
-            else:
-                keyRange = lib.anim.selectedTime()
-
-        for ctrl, targetSpace in self.curPreset.items():
-            if not isinstance(ctrl, basestring):
-                fossil.space.switchRange(ctrl, targetSpace, range=keyRange)
-        '''
+    # File io ----
 
     def autoSave(self):
-        
-        path = os.path.expandvars(self.filepath)
+        '''
+        Saves the current preset json file.
+        '''
+        path = os.path.expandvars(self.presetFilepath)
         if not os.path.exists(os.path.dirname(path)):
             os.makedirs(os.path.dirname(path))
         
+        newData = self.convertNodesToNames()
         with open(path, 'w') as fid:
-            json.dump(self._saveConvert(), fid, indent=4)
+            json.dump(newData, fid, indent=4)
 
-    def save(self):
-        result = fileDialog2(fm=0, ff='Json(*.json)')
-        if result:
-            with open(result[0], 'w') as fid:
-                json.dump(self._saveConvert(), fid, indent=4)
                 
-    def _saveConvert(self):
-        # Turn PyNode control into shortNames
-        convertedMaster = {}
-        for presetName, preset in self.presets.items():
-            converted = {}
+    def convertNodesToNames(self):
+        '''
+        Returns an json serializable version of the current preset file.
+        '''
+        convertedMaster = collections.OrderedDict()
+        for presetName, preset in self.profiles.items():
+            converted = collections.OrderedDict()
             for ctrl, space in preset.items():
-                if not isinstance(ctrl, basestring):
-                    ctrlName = simpleName(ctrl)
+                ctrlName = simpleName(ctrl) if not isinstance(ctrl, basestring) else ctrl
+                
                 converted[ctrlName] = space
             convertedMaster[presetName] = converted
             
         return convertedMaster
-        
-    def load(self):
-        result = fileDialog2(fm=1, ff='Json(*.json)')
 
-        if result:
-            self._load(result[0])
-            
-    def _load(self, filename):
-        global _previouslyLoaded
-        
-        self.filepath = filename
-        self.rankedPresets = load(filename)
-        
-        self.presets = self.rankedPresets.items()[0][1]
-        
-        items = optionMenu(self.char, q=True, ill=True)
-        if items:
-            deleteUI(items)
-        
-        self.char.addItems( [main for rank, main in self.rankedPresets] )
-    
-        self.loadFormattedPreset()
-        
-        _previouslyLoaded = filename
-    
-    def loadFormattedPreset(self):
-        self.presetList.removeAll()
-        for name in sorted(self.presets):
-            self.presetList.append(name)
-        
-        self.enablePresetUI()
-        self.setLoadedLabel()
-    
-    def setLoadedLabel(self):
-        '''
-        ..  todo::
-            Use the path to determine the location instead of passing it around.
-        '''
-        name = os.path.splitext(os.path.basename( self.filepath ))[0]
-        self.name.setLabel(name)
-        self.location.setLabel( '  (' + self.presetLocationChooser.getValue() + ')' )
-        
 
-def load(filename):
+
+def profileNamePrompt(msg='Enter a name', name='', validator=lambda x: True):
     '''
-    Given preset `filename`, returns a dict of the actual controls in the scene
-    mapped to their spaces.
-    
-    ex:
-    # File has:
-    {
-        'TrueWorld': {  'Arm_L': 'trueWorld',
-                        'Leg_L_pv': 'trueWorld',
-                        'Leg_R_pv': 'trueWorld'},
-                        
-        'World': {      'Arm_L': 'world',
-                        'Leg_L_pv': 'world',
-                        'Leg_R_pv': 'world'}
-    }
-    
-    Turns into:
-    {
-        (0, 'Rig:Naga:main'):  # Number is how many unique controls failed to match
-        {
-            'TrueWorld': {  nt.RigController('Arm_L'): 'trueWorld',
-                            nt.SubController('Leg_L_pv'): 'trueWorld',
-                            nt.SubController('Leg_R_pv'): 'trueWorld'},
-                            
-            'World': {      nt.RigController('Arm_L'): 'world',
-                            nt.SubController('Leg_L_pv'): 'world',
-                            nt.SubController('Leg_R_pv'): 'world'}
-        },
-        (1, 'Griffin:Naga:main'):
-        {
-            'TrueWorld': {  nt.RigController('Arm_L'): 'trueWorld',
-                            nt.SubController('Leg_L_pv'): 'trueWorld',
-                            nt.SubController('Leg_R_pv'): 'trueWorld'},
-                            
-            'World': {      nt.RigController('Arm_L'): 'world',
-                            nt.SubController('Leg_L_pv'): 'world',
-        }
-    }
-    
-    
+    validator is a function that takes the name and returns a string of the new message to display.
     '''
     
-    # Quick way to make a resetting cache for controllers()
-    allControls = core.findNode.controllers()
-    #allControlShortNames = [ simpleName(ctrl) for ctrl in allControls ]
-    
-    # Group all the controls by their main node.
-    groups = {None: {}}
-    mainNodePattern = re.compile('.*(\||:)main\|')
-    for ctrl in allControls:
-        match = mainNodePattern.match(ctrl.longName())
-        if match:
-            #print match.group(0)
-            if match.group(0) not in groups:
-                groups[match.group(0)] = {}
-            
-            groups[match.group(0)][simpleName(ctrl)] = ctrl
-        else:
-            groups[None][simpleName(ctrl)] = ctrl
-    #print '\n'.join([str(s) for s in groups.keys()])
-    #self.presetList.removeAll()
-    
-    with open(filename, 'r') as fid:
-        rawPresets = json.load(fid)
-
-    # Find all the controls that this set references
-    requiredNames = set()
-    for preset in rawPresets.values():
-        for ctrlName in preset:
-            requiredNames.add(ctrlName)
-    
-    # Find how many controls in the scene don't exist in each group
-    ranked = []
-    for main, shortNames in groups.items():
-        if requiredNames.issubset( shortNames ):
-            ranked.append( (len(requiredNames.difference(shortNames)), main) )
-        
-    # Turn the group's names in pynodes
-    convertedMasters = collections.OrderedDict()
-
-    for rank, main in sorted(ranked):
-        # Turn all the control names into pynodes
-        
-        def getControl(short_name):
-            if short_name in groups[main]:
-                return groups[main][short_name]
+    while True:
+        res = promptDialog(m=msg, t='Enter a profile name', tx=name, b=['Enter', 'Cancel'])
+        if res == 'Cancel':
             return None
         
-        convertedMaster = {}
-        for presetName, preset in rawPresets.items():
-            converted = {}
-            for ctrlName, space in preset.items():
-                ctrl = getControl(ctrlName)
-                if not ctrl:
-                    ctrl = ctrlName
-                converted[ctrl] = space
+        name = promptDialog(q=True, text=True)
         
-            convertedMaster[presetName] = converted
+        temp = validator(name)
+        if temp is not None:
+            msg = temp
+        else:
+            return name
+
+
+def isValidFilename(name):
+    res = re.search( '[\w -_\.]*', name )
+    if res:
+        return res.group(0) == name
+    
+    return False
+
+
+class AddPresetDialog(QtWidgets.QDialog):
+    def __init__(self, locations, parent=None):
+        super(AddPresetDialog, self).__init__()
         
-        convertedMasters[(rank, main)] = convertedMaster
+        self.ui = Ui_Dialog()
+        self.ui.setupUi(self)
+
+        self.ui.location.addItems( locations )
+    
+        self.ui.ok.clicked.connect( self.validate )
+        self.ui.cancel.clicked.connect( self.reject )
+
+
+    def presetNameExists(self, name):
+        folder = SpacePresets.presetLocations[ self.ui.location.currentText() ]
+        return name.lower() in {f.lower() for f in os.listdir(folder)}
+    
+    
+    def validate(self):
+        name = self.ui.nameEntry.text()
+        if not name:
+            self.ui.message.setText( '** You must specify a name! **' )
+            return
             
-    return convertedMasters
-    
-    
-def apply_OLD(preset, mode):
-    '''
-    
-    :test:
-        # Make a leg, animate it in fk, apply and verify
-        preset = {'Leg_L': 'world'}
-    
-    '''
-    with core.ui.NoUpdate():
-        if mode == 'frame':
-            keyRange = [currentTime()] * 2
-        elif mode == 'all':
-            keyRange = (None, None)
-        elif mode == 'range':
-            keyRange = (playbackOptions(q=True, min=True), playbackOptions(q=True, max=True))
-        elif mode == 'selected':
-            if not core.time.rangeIsSelected():
-                keyRange = [currentTime()] * 2
-            else:
-                keyRange = core.time.selectedTime()
+        elif self.presetNameExists(name):
+            self.ui.message.setText( '** This name already exists, choosea new one **' )
+            return
+            
+        elif not isValidFilename(name):
+            self.ui.message.setText( '** This name must be a valid filename **' )
+            return
 
-        # Switch all explicit ik/fks
-
-        for ctrl, targetSpace in preset.items():
-            if not isinstance(ctrl, basestring):
-                # Figure out if I'm in the right space
-                mainCtrl = fossil.rig.getMainController(ctrl)
-                
-                switcher = fossil.controllerShape.getSwitcherPlug(ctrl)
-                
-                # Implicit to ensure we're in the mode that the space is in.
-                if switcher:
-                    if mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 0.0:
-                        fossil.kinematicSwitch.activateFkRange(mainCtrl, *keyRange)
-                        
-                    elif getAttr(switcher) != 1.0:
-                        fossil.kinematicSwitch.activateIk(mainCtrl, *keyRange)
-                
-                if targetSpace != ACTIVATE_KEY:
-                    fossil.space.switchRange(ctrl, targetSpace, range=keyRange)
-
+        self.accept()
 
 
 def getLimbKeyTimes(control, start, end):
+    '''
+    If there are any keys at all, they are returned, including the start/end (if given).
+    '''
     #otherObj = control.getOtherMotionType()
     
     #drivePlug = controllerShape.getSwitcherPlug(control)
 
     controls = [ ctrl for name, ctrl in control.subControl.items() ] + [control]
     
-    finalRange = core.time.findKeyTimes(controls, start=start, end=end)
+    finalRange = lib.anim.findKeyTimes(controls, start=start, end=end)
     
     return finalRange
-
 
 
 def getIkSwitchCommand(ikController):
@@ -747,8 +541,9 @@ def getIkSwitchCommand(ikController):
 
 
 def getSpaceTimes(control, range=(None, None)):
+    ''' Returns the times a space is keyed on the given control. '''
     attrs = ['space'] + [t + a for t in 'tr' for a in 'xyz']
-    #curTime = currentTime(q=True)
+    
     times = keyframe( control, at=attrs, q=True, tc=True)
     times = sorted(set(times))
     if range[0] is not None and range[1] is not None:
@@ -774,16 +569,12 @@ def performSpaceSwitch(control, targetSpace, enumVal):
     control.t.setKey()
     control.r.setKey()
 
-#getSpaceTimes(selected()[0])
-
-#getLimbKeyTimes( selected()[0], 0, 30 )
-
-
-presetLog = logging.getLogger('presetSwitching')
-presetLog.setLevel( logging.DEBUG )
-
 
 def toFk(ctrls, switcher):
+    '''
+    Args:
+        ctrls: list of fk controls to be activated, with the main control listed first
+    '''
     fossil.kinematicSwitch.activateFk( ctrls[0] )
     
     setKeyframe(ctrls, shape=False)
@@ -791,96 +582,171 @@ def toFk(ctrls, switcher):
     setKeyframe(switcher)
 
 
-def apply(preset, mode):
-    if mode == 'frame':
-        keyRange = [currentTime()] * 2
-    elif mode == 'all':
-        keyRange = (None, None)
-    elif mode == 'range':
-        keyRange = (playbackOptions(q=True, min=True), playbackOptions(q=True, max=True))
-    elif mode == 'selected':
-        if not core.time.rangeIsSelected():
-            keyRange = [currentTime()] * 2
-        else:
-            keyRange = core.time.selectedTime()
+def shouldBeFk(mainCtrl, switcher):
+    return (mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 0.0)
+                        
 
-    presetLog.debug('Range {} {}'.format(keyRange[0], keyRange[-1]))
+def shouldBeIk(mainCtrl, switcher):
+    return (not mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 1.0)
+
+
+def cleanTargetKeys(mainCtrl, switcher, times):
+    '''
+    Make sure the switcher is keyed at all the given times and the controls are unkeyed.
     
-    kinematicSwitches = {}
-    allTimes = set()
+    *Technically* this should leave keys when it's keyed on, but this is already so complicated.
     
-    for ctrl, targetSpace in preset.items():
-        if not isinstance(ctrl, basestring):
+    '''
+    if times:
+        # If we are range switching, we have to key everything.
+            
+        # Put keys at all frames that will be switched if not already there to anchor the values.
+        # Only doing a single key because `insert=True` keying is done later
+        if not keyframe(switcher, q=True):
+            setKeyframe(switcher, t=times[0])
+        
+        allControls = [ctrl for name, ctrl in mainCtrl.subControl.items()] + [mainCtrl]
+        # Remove all the old keys EXCLUDING SHAPES to preserve switches
+        cutKey( allControls, iub=True, t=(times[0], times[-1]), clear=True, shape=False )
+            
+        for t in times:
+            setKeyframe( switcher, t=t, insert=True )
+
+
+def apply(preset, mode):
+    '''
+    &&& Do I optionally bookend the ranged switches?  Probably.
+    Args:
+        preset: Dict of { <pynode control>: '<space name or "# Activate">', ... }
+        mode: str of [frame, all, range, selected]
+    '''
+    
+    '''
+    Tests
+    All the combinations:
+        Fk to Ik, ends are keyed
+            opposite
+        Fk to Ik, ends are not keyed
+            opposite
+        
+    '''
+    
+    if mode == 'frame':
+        # Single frame is easy, just do the work and get out
+        for ctrl, targetSpace in preset.items():
             mainCtrl = fossil.rig.getMainController(ctrl)
             switcher = fossil.controllerShape.getSwitcherPlug(ctrl)
             
+            # Ensure we're in ik or fk prior to switching spaces
+            if switcher:
+                if shouldBeFk(mainCtrl, switcher):
+                    fossil.kinematicSwitch.activateFk( mainCtrl )
+                elif shouldBeIk(mainCtrl, switcher):
+                    getIkSwitchCommand(mainCtrl)()
+            
+            # Finally space switch
+            if targetSpace != ACTIVATE_KEY:
+                fossil.space.switchToSpace( ctrl, targetSpace )
+        
+        return
+        
+    else:
+        if mode == 'all':
+            keyRange = (None, None)
+        elif mode == 'range':
+            keyRange = (playbackOptions(q=True, min=True), playbackOptions(q=True, max=True))
+        elif mode == 'selected':
+            if not core.time.rangeIsSelected():
+                keyRange = [currentTime()] * 2
+            else:
+                keyRange = core.time.selectedTime()
+
+        presetLog.debug('Range {} {}'.format(keyRange[0], keyRange[-1]))
+        
+        '''
+        This is a complex optimization.  The naive switcher ran over the timeline for _each_ control.
+        Walking the timeline is the slowest operation (probably because all other nodes update) so a 10 control
+        profile took 10x longer than a 1 control profile.
+        
+        Solution: collect all the times all events occur at, walk the timeline ONCE and switch as needed.
+        Technically this is actually done twice, once to do the kinematic switch, and again to for the space.
+        Future improvement will try to do it as one.
+        
+        kinematicSwitches[ <switch command> ] = [ <list of times to run at> ]
+        
+        
+        '''
+        
+        kinematicSwitches = {}
+        allTimes = set()
+        
+        for ctrl, targetSpace in preset.items():
+            if isinstance(ctrl, basestring):
+                continue
+                
+            mainCtrl = fossil.rig.getMainController(ctrl)
+            switcher = fossil.controllerShape.getSwitcherPlug(ctrl)
+
             # Implicit to ensure we're in the mode that the space is in.
             if switcher:
-                if (mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 0.0):
-                    times = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
+                times = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
+                if shouldBeFk(mainCtrl, switcher):
                     
-                    presetLog.debug( 'Switch to FK {} {} - {}'.format(mainCtrl, times[0], times[-1]) )
+                    if not times and mode == 'all':
+                        # I think we can just switch since it's unkeyed and move on
+                        if switcher:
+                            if shouldBeFk(mainCtrl, switcher):
+                                fossil.kinematicSwitch.activateFk( mainCtrl )
+                            elif shouldBeIk(mainCtrl, switcher):
+                                getIkSwitchCommand(mainCtrl)()
+                                
+                    else:
+                        presetLog.debug( 'Switch to FK {}: {} - {}'.format(mainCtrl, times[0], times[-1]) )
+                        fkCtrls = [mainCtrl] + [ctrl for name, ctrl in mainCtrl.subControl.items()]
+                        
+                        kinematicSwitches[ partial(toFk, fkCtrls, switcher) ] = times
+                        allTimes.update( times )
                     
-                    fkCtrls = [mainCtrl] + [ctrl for name, ctrl in mainCtrl.subControl.items()]
-                    
-                    kinematicSwitches[ partial(toFk, fkCtrls, switcher) ] = times
-                    
-                    allTimes.update( times )
-                    
-                elif (not mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 1.0):
+                elif shouldBeIk(mainCtrl, switcher):
+                    presetLog.debug( 'Switch to IK {} {} - {}'.format(mainCtrl, times[0], times[-1]) )
                     times = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
                     kinematicSwitches[ getIkSwitchCommand(mainCtrl) ] = times
                     allTimes.update( times )
-                    
-                    presetLog.debug( 'Switch to IK {} {} - {}'.format(mainCtrl, times[0], times[-1]) )
-                
-                else:
-                    times = []
-                
-                if len(times) > 1:
-                    # If we are range switching, we have to key everything.
-                        
-                    # Put keys at all frames that will be switched if not already there to anchor the values
-                    if not keyframe(switcher, q=True):
-                        setKeyframe(switcher, t=times[0])
-                    
-                    ikControls = [ctrl for name, ctrl in mainCtrl.subControl.items()] + [mainCtrl]
-                    # Remove all the old keys EXCLUDING SHAPES to preserve switches
-                    cutKey( ikControls, iub=True, t=(times[0], times[-1]), clear=True, shape=False )
-                        
-                    for t in times:
-                        setKeyframe( switcher, t=t, insert=True )
+                                
+                cleanTargetKeys(mainCtrl, switcher, times)
+        
+        with core.time.PreserveCurrentTime():
+            # First timeline runthrough - ensure the kinematic state is correct.
+            with core.ui.NoUpdate():
+                presetLog.debug('KINEMATIC TIMES {}'.format(allTimes))
+                for i in sorted(allTimes):
+                    currentTime(i)
+                    for cmd, vals in kinematicSwitches.items():
+                        if i in vals:
+                            cmd()
             
-            #fossil.space.switchRange(ctrl, targetSpace, range=keyRange)
-    
-    with core.time.PreserveCurrentTime():
-        with core.ui.NoUpdate():
-            presetLog.debug('KIN TIMES {}'.format(allTimes))
-            for i in sorted(allTimes):
-                currentTime(i)
-                for cmd, vals in kinematicSwitches.items():
-                    if i in vals:
-                        cmd()
-        
-        spaceSwitches = {}
-        
-        allTimes = set()
-        for ctrl, targetSpace in preset.items():
-            if not isinstance(ctrl, basestring):
-                
-                times = getSpaceTimes(ctrl, keyRange)
-                if not times:
-                    fossil.space.switchToSpace( ctrl, targetSpace )
-                else:
-                    allTimes.update(times)
-                
-                presetLog.debug('Switch Ctrl {}'.format(ctrl) )
-                enumVal = ctrl.space.getEnums()[targetSpace]
-                spaceSwitches[ partial(performSpaceSwitch, ctrl, targetSpace, enumVal) ] = times
-        
-        with core.ui.NoUpdate():
-            for i in sorted(allTimes):
-                currentTime(i)
-                for cmd, vals in spaceSwitches.items():
-                    if i in vals:
-                        cmd()
+            # Just like with kinematics, gather all the frames a space switch is needed.
+            spaceSwitches = {}
+            
+            allSpaceTimes = set()
+            for ctrl, targetSpace in preset.items():
+                if not isinstance(ctrl, basestring) and targetSpace != ACTIVATE_KEY:
+                    
+                    # If the space is unkeyed, just switch it, other wise store it
+                    times = getSpaceTimes(ctrl, keyRange)
+                    if not times:
+                        fossil.space.switchToSpace( ctrl, targetSpace )
+                    else:
+                        allSpaceTimes.update(times)
+                    
+                        presetLog.debug('Switch Ctrl {}'.format(ctrl) )
+                        enumVal = ctrl.space.getEnums()[targetSpace]
+                        spaceSwitches[ partial(performSpaceSwitch, ctrl, targetSpace, enumVal) ] = times
+            
+            # Finally, walk the timeline a second time switching spaces as needed.
+            with core.ui.NoUpdate():
+                for i in sorted(allSpaceTimes):
+                    currentTime(i)
+                    for cmd, vals in spaceSwitches.items():
+                        if i in vals:
+                            cmd()
