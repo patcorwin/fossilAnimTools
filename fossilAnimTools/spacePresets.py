@@ -29,13 +29,11 @@ from PySide2 import QtWidgets
 from shiboken2 import wrapInstance
 from maya import OpenMayaUI
 
-from pymel.core import columnLayout, currentTime, cutKey, deleteUI, \
+from pymel.core import columnLayout, cmds, currentTime, cutKey, deleteUI, \
     getAttr, keyframe, playbackOptions, promptDialog, PyNode, \
-    select, selected, setKeyframe, scriptJob, window
+    select, selected, setAttr, setKeyframe, window
 
-from pdil.add import shortName, simpleName
-
-from pdil import core, lib
+import pdil
 from pdil.tool import fossil
 
 from .spacepresetgui import Ui_Form
@@ -50,6 +48,11 @@ try:
     basestring # noqa
 except Exception:
     basestring = str
+    
+try:
+    long
+except:
+    long = int
 
 
 if '_previouslyLoaded' not in globals():
@@ -66,7 +69,7 @@ class SpacePresets(QtWidgets.QWidget):
     presetLocations = { 'local': os.environ['maya_app_dir'] + '/SpacePresets' }
     
     @classmethod
-    @core.alt.name( 'Space Presets' )
+    @pdil.alt.name( 'Space Presets' )
     def run(cls):
         if window(cls.name, ex=True):
             deleteUI(cls.name)
@@ -128,6 +131,7 @@ class SpacePresets(QtWidgets.QWidget):
         self.applyButtons = [self.ui.applyFrame, self.ui.applyRange, self.ui.applySelected, self.ui.applyAll]
     
         self.enableProfileGui(False)
+        self.show()
     
     
     def applySwitch(self, mode):
@@ -143,7 +147,7 @@ class SpacePresets(QtWidgets.QWidget):
         
 
     def populateCharacterChooser(self):
-        self.mainControllers = core.findNode.mainControls()
+        self.mainControllers = fossil.find.mainGroups()
         self.ui.characterChooser.clear()
         self.ui.characterChooser.addItems( ['-'] + [main.name() for main in self.mainControllers] )
     
@@ -217,11 +221,11 @@ class SpacePresets(QtWidgets.QWidget):
         # Get controls from the character chooser, defaulting to all
         index = self.ui.characterChooser.currentIndex() - 1 # First item is blank so offset by 1
         if index >= 0:
-            allControls = core.findNode.controllers(main=self.mainControllers[index])
+            allControls = fossil.find.controllers(main=self.mainControllers[index])
         else:
-            allControls = core.findNode.controllers()
+            allControls = fossil.find.controllers()
     
-        nameMap = {shortName(ctrl): ctrl for ctrl in allControls}
+        nameMap = {pdil.simpleName(ctrl): ctrl for ctrl in allControls}
         
         items = self.profiles[ profileName ].items()
         self.ui.profileTable.setRowCount( len(items) )
@@ -269,7 +273,7 @@ class SpacePresets(QtWidgets.QWidget):
 
 
     def addRow(self, row, ctrl, space):
-        name = simpleName(ctrl)
+        name = pdil.simpleName(ctrl)
         selectButton = QtWidgets.QPushButton( name )
         selectButton.clicked.connect( partial(select, ctrl) )
         
@@ -423,7 +427,7 @@ class SpacePresets(QtWidgets.QWidget):
         for presetName, preset in self.profiles.items():
             converted = collections.OrderedDict()
             for ctrl, space in preset.items():
-                ctrlName = simpleName(ctrl) if not isinstance(ctrl, basestring) else ctrl
+                ctrlName = pdil.simpleName(ctrl) if not isinstance(ctrl, basestring) else ctrl
                 
                 converted[ctrlName] = space
             convertedMaster[presetName] = converted
@@ -452,7 +456,7 @@ def profileNamePrompt(msg='Enter a name', name='', validator=lambda x: True):
 
 
 def isValidFilename(name):
-    res = re.search( '[\w -_\.]*', name )
+    res = re.search( r'[\w -_\.]*', name )
     if res:
         return res.group(0) == name
     
@@ -496,7 +500,7 @@ class AddPresetDialog(QtWidgets.QDialog):
 
 def getLimbKeyTimes(control, start, end):
     '''
-    If there are any keys at all, they are returned, including the start/end (if given).
+    If there are any keys at all, they are returned, including the start/end (if given).  Returns empty list if no keys.
     '''
     #otherObj = control.getOtherMotionType()
     
@@ -504,7 +508,7 @@ def getLimbKeyTimes(control, start, end):
 
     controls = [ ctrl for name, ctrl in control.subControl.items() ] + [control]
     
-    finalRange = lib.anim.findKeyTimes(controls, start=start, end=end)
+    finalRange = pdil.anim.findKeyTimes(controls, start=start, end=end)
     
     return finalRange
 
@@ -583,14 +587,14 @@ def toFk(ctrls, switcher):
 
 
 def shouldBeFk(mainCtrl, switcher):
-    return (mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 0.0)
+    return (mainCtrl.getMotionKeys() == 'fk' and getAttr(switcher) != 0.0)
                         
 
 def shouldBeIk(mainCtrl, switcher):
-    return (not mainCtrl.getMotionType().endswith('fk') and getAttr(switcher) != 1.0)
+    return (mainCtrl.getMotionKeys() == 'ik' and getAttr(switcher) != 1.0)
 
 
-def cleanTargetKeys(mainCtrl, switcher, times):
+def cleanTargetKeys(mainCtrl, switcher, times, switcherTarget):
     '''
     Make sure the switcher is keyed at all the given times and the controls are unkeyed.
     
@@ -606,11 +610,24 @@ def cleanTargetKeys(mainCtrl, switcher, times):
             setKeyframe(switcher, t=times[0])
         
         allControls = [ctrl for name, ctrl in mainCtrl.subControl.items()] + [mainCtrl]
-        # Remove all the old keys EXCLUDING SHAPES to preserve switches
-        cutKey( allControls, iub=True, t=(times[0], times[-1]), clear=True, shape=False )
+        # Remove all the old keys where the other side is active to some extent
+        pairs = keyframe(switcher, q=1, tc=1, vc=1)
+        start = times[0]
+        end = times[-1]
+        killTimes = [t for t, v in pairs if not pdil.math.isCloseF(v, switcherTarget) and (start <= t <= end)]
+        #cutKey( allControls, iub=True, t=(times[0], times[-1]), clear=True, shape=False )
+        cmds.cutKey(allControls, iub=True, clear=True, shape=False, t=[(t, t) for t in killTimes]  )
             
         for t in times:
             setKeyframe( switcher, t=t, insert=True )
+
+
+def keySwitcher(switcher, times):
+    if not keyframe(switcher, q=True, tc=True):
+        setKeyframe(switcher, t=times[0])
+
+    for t in times:
+        setKeyframe(switcher, t=t, insert=True)
 
 
 def apply(preset, mode):
@@ -631,6 +648,49 @@ def apply(preset, mode):
         
     '''
     
+    print(preset)
+    
+    leads = set()
+    
+    spaces = {}
+    
+    for ctrl, action in preset.items():
+        leads.add( pdil.findNode.leadController(ctrl) )
+        if action != ACTIVATE_KEY:
+            spaces[ctrl] = action
+    
+    
+    if mode == 'frame':
+        start = int( currentTime(q=True) )
+        end = int( currentTime(q=True) )
+        
+    elif mode == 'range':
+        start, end = pdil.time.playbackRange()
+        
+    elif mode == 'selected':
+        if not pdil.time.rangeIsSelected():
+            start, end = pdil.time.playbackRange()
+        else:
+            start, end = pdil.time.selectedTime()
+    
+    elif mode == 'all':
+        
+        #pairs = { obj: obj.getOtherMotionType() for obj in currentLeads }
+        source = [obj.getOtherMotionType() for obj in leads]
+        
+        #targetLeads = [other for obj, other in pairs.items() if other]
+        
+        relevantControls = []
+        relevantControls += source
+        for leadControl in source:
+            relevantControls += [obj for name, obj in leadControl.subControl.items()]
+        
+        start, end = pdil.anim.findKeyTimes(relevantControls, None, None)
+    print(start, end, '- - - -  - - ', leads)
+    pdil.tool.fossil.kinematicSwitch.animStateSwitch(leads, start, end, spaces)
+    
+    return
+    
     if mode == 'frame':
         # Single frame is easy, just do the work and get out
         for ctrl, targetSpace in preset.items():
@@ -642,7 +702,9 @@ def apply(preset, mode):
                 if shouldBeFk(mainCtrl, switcher):
                     fossil.kinematicSwitch.activateFk( mainCtrl )
                 elif shouldBeIk(mainCtrl, switcher):
+                    # &&& This appears to key always, is this ok?
                     getIkSwitchCommand(mainCtrl)()
+                    setAttr(switcher, 1) # 7/9/2020 the switch command needs burping so actively set it
             
             # Finally space switch
             if targetSpace != ACTIVATE_KEY:
@@ -656,10 +718,10 @@ def apply(preset, mode):
         elif mode == 'range':
             keyRange = (playbackOptions(q=True, min=True), playbackOptions(q=True, max=True))
         elif mode == 'selected':
-            if not core.time.rangeIsSelected():
+            if not pdil.time.rangeIsSelected():
                 keyRange = [currentTime()] * 2
             else:
-                keyRange = core.time.selectedTime()
+                keyRange = pdil.time.selectedTime()
 
         presetLog.debug('Range {} {}'.format(keyRange[0], keyRange[-1]))
         
@@ -673,8 +735,6 @@ def apply(preset, mode):
         Future improvement will try to do it as one.
         
         kinematicSwitches[ <switch command> ] = [ <list of times to run at> ]
-        
-        
         '''
         
         kinematicSwitches = {}
@@ -686,39 +746,66 @@ def apply(preset, mode):
                 
             mainCtrl = fossil.rig.getMainController(ctrl)
             switcher = fossil.controllerShape.getSwitcherPlug(ctrl)
-
+            print(mainCtrl, switcher)
             # Implicit to ensure we're in the mode that the space is in.
             if switcher:
-                times = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
+                otherMotionTimes = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
+                targetTimes = getLimbKeyTimes( mainCtrl, keyRange[0], keyRange[1] )
+                presetLog.debug('other times count: {}   target times count: {}'.format( len(otherMotionTimes), len(targetTimes) ))
+                # Neither is keyed, perform basic switch
+                if not otherMotionTimes and not targetTimes:
+                    presetLog.debug('No keys on either, just switch')
+                    if shouldBeFk(mainCtrl, switcher):
+                        fossil.kinematicSwitch.activateFk( mainCtrl )
+
+                    elif shouldBeIk(mainCtrl, switcher):
+                        getIkSwitchCommand(mainCtrl)()
+
+                    continue
+
+                # Bizarre case, no keys on the source space but some on dest space
+                # Just switch at the ends and clean out the middle
+                if not otherMotionTimes and targetTimes:
+                    presetLog.debug('Only target')
+                    #otherMain = mainCtrl.getOtherMotionType()
+                    controls = [mainCtrl] + [ ctrl for name, ctrl in mainCtrl.subControl.items() ]
+                    if shouldBeFk(mainCtrl, switcher):
+                        cutKey(controls, iub=True, t=keyRange, cl=True)
+                        #fossil.kinematicSwitch.activateFk( mainCtrl )
+                        kinematicSwitches[ partial(toFk, controls, switcher) ] = keyRange
+
+                    elif shouldBeIk(mainCtrl, switcher):
+                        cutKey(controls, iub=True, t=keyRange, cl=True)
+                        kinematicSwitches[ getIkSwitchCommand(mainCtrl) ] = keyRange
+                        #getIkSwitchCommand(mainCtrl)()
+                    
+                    allTimes.update( keyRange )
+                    # Does cleanTargetKeys() need to happen here?  I don't think so,
+                    continue
+                
+
                 if shouldBeFk(mainCtrl, switcher):
+                    targetMotion = 0
+                    presetLog.debug( 'Switch to FK {}: {} - {}'.format(mainCtrl, otherMotionTimes[0], otherMotionTimes[-1]) )
+                    fkCtrls = [mainCtrl] + [ctrl for name, ctrl in mainCtrl.subControl.items()]
                     
-                    if not times and mode == 'all':
-                        # I think we can just switch since it's unkeyed and move on
-                        if switcher:
-                            if shouldBeFk(mainCtrl, switcher):
-                                fossil.kinematicSwitch.activateFk( mainCtrl )
-                            elif shouldBeIk(mainCtrl, switcher):
-                                getIkSwitchCommand(mainCtrl)()
-                                
-                    else:
-                        presetLog.debug( 'Switch to FK {}: {} - {}'.format(mainCtrl, times[0], times[-1]) )
-                        fkCtrls = [mainCtrl] + [ctrl for name, ctrl in mainCtrl.subControl.items()]
-                        
-                        kinematicSwitches[ partial(toFk, fkCtrls, switcher) ] = times
-                        allTimes.update( times )
-                    
+                    kinematicSwitches[ partial(toFk, fkCtrls, switcher) ] = otherMotionTimes
+                    allTimes.update( otherMotionTimes )
+                
                 elif shouldBeIk(mainCtrl, switcher):
-                    presetLog.debug( 'Switch to IK {} {} - {}'.format(mainCtrl, times[0], times[-1]) )
-                    times = getLimbKeyTimes( mainCtrl.getOtherMotionType(), keyRange[0], keyRange[1] )
-                    kinematicSwitches[ getIkSwitchCommand(mainCtrl) ] = times
-                    allTimes.update( times )
-                                
-                cleanTargetKeys(mainCtrl, switcher, times)
+                    targetMotion = 1
+                    presetLog.debug( 'Switch to IK {} {} - {}'.format(mainCtrl, otherMotionTimes[0], otherMotionTimes[-1]) )
+                    kinematicSwitches[ getIkSwitchCommand(mainCtrl) ] = otherMotionTimes
+                    allTimes.update( otherMotionTimes )
+                
+                if otherMotionTimes:
+                    keySwitcher(switcher, otherMotionTimes)
+                    cleanTargetKeys(mainCtrl, switcher, otherMotionTimes, targetMotion)
         
-        with core.time.PreserveCurrentTime():
+        with pdil.time.preserveCurrentTime():
             # First timeline runthrough - ensure the kinematic state is correct.
-            with core.ui.NoUpdate():
-                presetLog.debug('KINEMATIC TIMES {}'.format(allTimes))
+            with pdil.ui.NoUpdate():
+                presetLog.debug('KINEMATIC TIMES {}'.format(sorted(allTimes)))
                 for i in sorted(allTimes):
                     currentTime(i)
                     for cmd, vals in kinematicSwitches.items():
@@ -744,7 +831,7 @@ def apply(preset, mode):
                         spaceSwitches[ partial(performSpaceSwitch, ctrl, targetSpace, enumVal) ] = times
             
             # Finally, walk the timeline a second time switching spaces as needed.
-            with core.ui.NoUpdate():
+            with pdil.ui.NoUpdate():
                 for i in sorted(allSpaceTimes):
                     currentTime(i)
                     for cmd, vals in spaceSwitches.items():

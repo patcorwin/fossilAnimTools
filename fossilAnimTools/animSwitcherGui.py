@@ -5,8 +5,8 @@ import traceback
 from pymel.core import formLayout, window, deleteUI, tabLayout, radioButtonGrp, scrollLayout, columnLayout, frameLayout, \
     text, rowColumnLayout, button, Callback, cmds, showWindow, currentTime, textScrollList, scriptJob, optionMenu, selected, warning
 
-from pdil import core
-from pdil.tool.fossil import controllerShape, kinematicSwitch, space
+import pdil
+from pdil.tool import fossil
 
 from . import spacePresets
 
@@ -15,7 +15,7 @@ import os
 class Gui(object):
     name = 'AnimationTool'
     
-    settings = core.ui.Settings(
+    settings = pdil.ui.Settings(
         "Space Switching Settings",
         {
             'key': True,
@@ -41,7 +41,7 @@ class Gui(object):
     
     
     @staticmethod
-    @core.alt.name( 'Anim Switch GUI' )
+    @pdil.alt.name( 'Anim Switch GUI' )
     def run():
         return Gui()
     
@@ -76,7 +76,7 @@ class Gui(object):
                         with frameLayout(l='Ik/Fk Switching', cll=True) as ikFkFrame:
                             self.settings.frameLayoutSetup(ikFkFrame, 'ikfkCollapsed')
                             with rowColumnLayout(nc=3, cw=[(1, 200), (2, 50), (3, 50)] ):
-                                for card in core.findNode.allCards():
+                                for card in fossil.find.blueprintCards():
                                     for side in ['Center', 'Left', 'Right']:
                                         try:
                                             ik = card.getSide(side).ik
@@ -200,7 +200,7 @@ class Gui(object):
         mode, start, end = self.processRange()
         #ikFkSwitch(obj, start, end)
         print(mode, start, end)
-        plug = controllerShape.getSwitcherPlug(obj)
+        plug = fossil.controllerShape.getSwitcherPlug(obj)
         if isIk and cmds.getAttr(plug) == 1.0:
             print('Already IK, skipping')
             return
@@ -209,7 +209,7 @@ class Gui(object):
             print('Already FK, skipping')
             return
         
-        kinematicSwitch.ikFkSwitch(obj, start, end)
+        fossil.kinematicSwitch.ikFkSwitch(obj, start, end)
         print('doing switch')
         
     """
@@ -229,7 +229,7 @@ class Gui(object):
             
             unkeyed = {}
             
-            controllers = [c for c in core.findNode.controllers() if nodeType(c) == 'transform']
+            controllers = [c for c in pdil.findNode.controllers() if nodeType(c) == 'transform']
             
             # Determine the times each controller has keys
             for ctrl in controllers:
@@ -246,7 +246,7 @@ class Gui(object):
             
             print( sorted(allTimes) )
             
-            with nested(core.time.PreserveCurrentTime(), core.ui.NoAutokey(), core.ui.NoUpdate()):
+            with nested(pdil.time.preserveCurrentTime(), pdil.ui.NoAutokey(), pdil.ui.NoUpdate()):
                 # Go through all the times resetting main
                 for t in sorted(allTimes):
                     currentTime(t)
@@ -298,16 +298,16 @@ class Gui(object):
             start, end = [currentTime()] * 2
             
         elif mode == 1:
-            start, end = core.time.playbackRange()
+            start, end = pdil.time.playbackRange()
         
         elif mode == 2:
             start, end = [None] * 2
         
         elif mode == 3:
-            if not core.time.rangeIsSelected():
+            if not pdil.time.rangeIsSelected():
                 start, end = [currentTime()] * 2
             else:
-                start, end = core.time.selectedTime()
+                start, end = pdil.time.selectedTime()
             
         return mode, start, end
         
@@ -324,19 +324,19 @@ class Gui(object):
         if not selection:
             return
         
-        with core.ui.NoUpdate():
+        with pdil.ui.NoUpdate( fossil.find.mainGroup() ):
             for sel in selection:
                 if self.targets.getSelectItem():
                     
                     targetSpace = self.targets.getSelectItem()[0]
-                    if targetSpace not in space.getNames( sel ):
+                    if targetSpace not in fossil.space.getNames( sel ):
                         warning( "{0} does not have space {1}, skipping".format( sel, targetSpace ) )
                         continue
                     
                     if mode != 0:
-                        space.switchRange( sel, targetSpace, (start, end) )
+                        fossil.space.switchRange( sel, targetSpace, (start, end) )
                     else:
-                        space.switchToSpace( sel, targetSpace )
+                        fossil.space.switchToSpace( sel, targetSpace )
         
     def update(self):
         self.targets.removeAll()
@@ -344,7 +344,7 @@ class Gui(object):
         sel = selected(type='transform')
         if sel:
             sel = sel[0]
-            names = space.getNames(sel)
+            names = fossil.space.getNames(sel)
             if names:
                 for name in names:
                     self.targets.append(name)

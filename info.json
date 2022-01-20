@@ -1,9 +1,17 @@
 {
-    "utc_build_time": "2020-04-06 06:09:04.195290",
+    "utc_build_time": "2020-05-06 19:04:48.177463",
+    "icon_paths": ["icons"],
     "shelf_items": [
         {
             "command": "import fossilAnimTools.animSwitcherGui\nfossilAnimTools.animSwitcherGui.Gui()",
-            "image": "fossilAnimTools/icons/switch.png"
-        }
+            "image": "fossilSwitch.png"
+        },
+		{
+			"command": "import fossilAnimTools;import pdil;pdil.alt.call('Offset Curves Gui')()"
+		},
+		{
+			"command": "import fossilAnimTools;import pdil;pdil.alt.call('Offset Curves')()",
+			"image": "fossilOffsetCurve.png"
+		}
     ]
 }
