@@ -655,7 +655,7 @@ def apply(preset, mode):
     spaces = {}
     
     for ctrl, action in preset.items():
-        leads.add( pdil.findNode.leadController(ctrl) )
+        leads.add( fossil.node.leadController(ctrl) )
         if action != ACTIVATE_KEY:
             spaces[ctrl] = action
     
