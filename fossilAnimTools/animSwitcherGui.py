@@ -209,7 +209,7 @@ class Gui(object):
             print('Already FK, skipping')
             return
         
-        fossil.kinematicSwitch.ikFkSwitch(obj, start, end)
+        fossil.kinematicSwitch.multiSwitch([obj], start, end)
         print('doing switch')
         
     """
