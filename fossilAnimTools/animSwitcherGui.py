@@ -324,7 +324,7 @@ class Gui(object):
         if not selection:
             return
         
-        with pdil.ui.NoUpdate( fossil.find.mainGroup() ):
+        with pdil.ui.NoUpdate( [fossil.find.mainGroup()] ):
             for sel in selection:
                 if self.targets.getSelectItem():
                     
