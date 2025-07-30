@@ -25,8 +25,7 @@ import logging
 import os
 import re
 
-from PySide2 import QtWidgets
-from shiboken2 import wrapInstance
+from pdil.vendor.Qt import QtWidgets, QtCompat
 from maya import OpenMayaUI
 
 from pymel.core import columnLayout, cmds, currentTime, cutKey, deleteUI, \
@@ -36,8 +35,8 @@ from pymel.core import columnLayout, cmds, currentTime, cutKey, deleteUI, \
 import pdil
 from pdil.tool import fossil
 
-from .spacepresetgui import Ui_Form
-from .spacePrestsPrompt_qtui import Ui_Dialog
+ui_file = os.path.dirname(__file__) + '/spacepresetgui.ui'
+ui_prompt_file = os.path.dirname(__file__) + '/spacePresetPrompt_qtui.ui'
 
 log = logging.getLogger(__name__)
 presetLog = logging.getLogger('presetSwitching')
@@ -85,22 +84,22 @@ class SpacePresets(QtWidgets.QWidget):
         
         melLayout = columnLayout(adj=True)
         ptr = OpenMayaUI.MQtUtil.findLayout( melLayout.name() )
-        widget = wrapInstance( long(ptr), QtWidgets.QWidget)  # noqa Despite findLayout, must cast to widget and use .layout()
+        widget = QtCompat.wrapInstance( long(ptr), QtWidgets.QWidget)  # noqa Despite findLayout, must cast to widget and use .layout()
         
         ui = cls()
         widget.layout().addWidget(ui)
         
         return melLayout, ui
     
+    
     def __init__(self, parent=None):
         super(SpacePresets, self).__init__()
         
-        self.ui = Ui_Form()
-        self.ui.setupUi(self)
+        self.ui = QtCompat.load_ui(ui_file, baseinstance=self )
         
         # Sets the control select button portion to stretch
         header = self.ui.profileTable.horizontalHeader()
-        header.setSectionResizeMode(0, header.Stretch)
+        header.setSectionResizeMode(0, pdil.vendor.Qt.QtWidgets.QHeaderView.ResizeMode.Stretch)
         
         self.mainControllers = []
         self.presetFiles = {}
@@ -467,8 +466,7 @@ class AddPresetDialog(QtWidgets.QDialog):
     def __init__(self, locations, parent=None):
         super(AddPresetDialog, self).__init__()
         
-        self.ui = Ui_Dialog()
-        self.ui.setupUi(self)
+        self.ui = QtCompat.load_ui(ui_prompt_file, baseinstance=self )
 
         self.ui.location.addItems( locations )
     
